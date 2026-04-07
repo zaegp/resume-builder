@@ -74,7 +74,15 @@ export default function ProfilePage() {
         body: formData,
       })
 
-      const json = await res.json()
+      const text = await res.text()
+      let json: Record<string, unknown>
+      try {
+        json = JSON.parse(text)
+      } catch {
+        console.error('Non-JSON response:', res.status, text.slice(0, 500))
+        setUploadError(`Server error (${res.status}): ${text.slice(0, 200)}`)
+        return
+      }
 
       if (!res.ok) {
         if (json.limit_reached) {
@@ -83,15 +91,14 @@ export default function ProfilePage() {
           setUploadError(
             'Could not fully extract your resume. Some fields may need manual editing.'
           )
-          // Still add the profile if it was partially created
           if (json.profile) {
-            setProfiles((prev) => [json.profile, ...prev])
+            setProfiles((prev) => [json.profile as ProfileRow, ...prev])
           }
         } else {
-          setUploadError(json.error ?? 'Upload failed. Please try again.')
+          setUploadError((json.error as string) ?? 'Upload failed. Please try again.')
         }
       } else {
-        setProfiles((prev) => [json.profile, ...prev])
+        setProfiles((prev) => [json.profile as ProfileRow, ...prev])
       }
     } catch (err) {
       console.error('Upload error:', err)
