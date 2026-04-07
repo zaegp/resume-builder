@@ -93,8 +93,9 @@ export default function ProfilePage() {
       } else {
         setProfiles((prev) => [json.profile, ...prev])
       }
-    } catch {
-      setUploadError('Network error. Please try again.')
+    } catch (err) {
+      console.error('Upload error:', err)
+      setUploadError(err instanceof Error ? err.message : 'Network error. Please try again.')
     } finally {
       setUploading(false)
       if (fileInputRef.current) {

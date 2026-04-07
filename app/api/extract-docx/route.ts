@@ -4,6 +4,10 @@ import { checkRateLimit } from '@/lib/rate-limit'
 import { extractFromDocx } from '@/lib/ai/extract-docx'
 import mammoth from 'mammoth'
 
+// Vercel serverless config: increase timeout and body size
+export const maxDuration = 60 // seconds
+export const dynamic = 'force-dynamic'
+
 export async function POST(request: NextRequest) {
   try {
     const supabase = await createClient()
