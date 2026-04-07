@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import mammoth from 'mammoth'
 import { createClient } from '@/lib/supabase/client'
 import type { ExtractedProfile, ProfileRow, WorkExperience, Project, Education } from '@/lib/types'
 import { Button } from '@/components/ui/button'
@@ -66,12 +67,19 @@ export default function ProfilePage() {
     setUploadError(null)
 
     try {
-      const formData = new FormData()
-      formData.append('file', file)
+      // Extract text client-side with mammoth (avoids Vercel 4.5MB body limit)
+      const arrayBuffer = await file.arrayBuffer()
+      const { value: rawText } = await mammoth.extractRawText({ arrayBuffer })
+
+      if (!rawText || rawText.trim().length < 50) {
+        setUploadError("Couldn't extract text from this file. Please try a different .docx or enter manually.")
+        return
+      }
 
       const res = await fetch('/api/extract-docx', {
         method: 'POST',
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ raw_text: rawText, file_name: file.name }),
       })
 
       const text = await res.text()

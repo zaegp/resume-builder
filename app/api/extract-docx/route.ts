@@ -2,10 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { checkRateLimit } from '@/lib/rate-limit'
 import { extractFromDocx } from '@/lib/ai/extract-docx'
-import mammoth from 'mammoth'
 
-// Vercel serverless config: increase timeout and body size
-export const maxDuration = 60 // seconds
+export const maxDuration = 60
 export const dynamic = 'force-dynamic'
 
 export async function POST(request: NextRequest) {
@@ -17,13 +15,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    // Rate limit
     const { success: withinLimit } = await checkRateLimit(user.id)
     if (!withinLimit) {
       return NextResponse.json({ error: 'Too many requests. Please wait a moment.' }, { status: 429 })
     }
 
-    // Check profile count limit (free tier: 2)
     const { count } = await supabase
       .from('profiles')
       .select('*', { count: 'exact', head: true })
@@ -36,27 +32,10 @@ export async function POST(request: NextRequest) {
       }, { status: 403 })
     }
 
-    // Parse the uploaded file
-    const formData = await request.formData()
-    const file = formData.get('file') as File | null
+    // Now receives pre-extracted text from client (mammoth runs client-side)
+    const { raw_text, file_name } = await request.json()
 
-    if (!file) {
-      return NextResponse.json({ error: 'No file uploaded' }, { status: 400 })
-    }
-
-    if (!file.name.endsWith('.docx')) {
-      return NextResponse.json({ error: 'Please upload a .docx file' }, { status: 400 })
-    }
-
-    if (file.size > 5 * 1024 * 1024) {
-      return NextResponse.json({ error: 'File too large. Maximum 5MB.' }, { status: 400 })
-    }
-
-    // Extract text with mammoth
-    const buffer = Buffer.from(await file.arrayBuffer())
-    const { value: rawText } = await mammoth.extractRawText({ buffer })
-
-    if (!rawText || rawText.trim().length < 50) {
+    if (!raw_text || typeof raw_text !== 'string' || raw_text.trim().length < 50) {
       return NextResponse.json({
         error: "Couldn't extract text from this file. Please enter your information manually.",
         fallback_manual: true
@@ -64,7 +43,7 @@ export async function POST(request: NextRequest) {
     }
 
     // AI extraction
-    const profile = await extractFromDocx(rawText)
+    const profile = await extractFromDocx(raw_text)
 
     // Save to database
     const { data: profileRow, error: dbError } = await supabase
@@ -72,7 +51,7 @@ export async function POST(request: NextRequest) {
       .insert({
         user_id: user.id,
         extracted_data: profile,
-        source_file_name: file.name,
+        source_file_name: file_name || 'resume.docx',
       })
       .select()
       .single()
