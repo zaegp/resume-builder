@@ -10,22 +10,22 @@ export async function matchAndRewrite(
   language: OutputLanguage
 ): Promise<MatchResult> {
   const langInstruction = language === 'zh'
-    ? 'Write all STAR-enhanced bullets in Chinese (Traditional Chinese / 繁體中文). Keep company names and technical terms in English.'
-    : 'Write all STAR-enhanced bullets in English.'
+    ? 'Respond in Chinese (Traditional Chinese / 繁體中文). Keep company names and technical terms in English.'
+    : 'Respond in English.'
 
   const response = await client.chat.completions.create({
     model: 'gpt-4o',
     messages: [
       {
         role: 'system',
-        content: `You are a professional resume consultant. Match the candidate's experiences to job requirements and rewrite bullet points using STAR format (Situation, Task, Action, Result).
+        content: `You are a resume matching expert. Your job is to align the candidate's existing experiences to job requirements. Find the best matching bullet point from the candidate's resume for each JD requirement.
 
 CRITICAL RULES:
-- You can ONLY rephrase and structure what the candidate provided.
-- NEVER add metrics, technologies, or achievements not in the original resume.
-- If a bullet lacks a quantifiable result, set needs_metric to true.
-- Match each requirement to the most relevant experience bullet.
+- Do NOT rewrite, rephrase, or enhance any bullet points. Return the original text exactly as-is.
+- Match each requirement to the single most relevant experience bullet from the candidate's resume.
+- If multiple bullets match, pick the strongest one.
 - If no experience matches a requirement, set matched to false.
+- The original_bullet field must contain the EXACT text from the candidate's resume, unchanged.
 ${langInstruction}`
       },
       {
@@ -34,7 +34,7 @@ ${langInstruction}`
 
 ${sanitizeUserContent(JSON.stringify(profile), 'candidate_profile')}
 
-Match the candidate's experiences to the job requirements. For each match, provide a STAR-format enhanced version of the original bullet.`
+For each job requirement, find the best matching experience bullet from the candidate's profile. Return the original bullet text exactly as written — do not modify it.`
       }
     ],
     tools: [
@@ -42,7 +42,7 @@ Match the candidate's experiences to the job requirements. For each match, provi
         type: 'function',
         function: {
           name: 'match_experiences',
-          description: 'Match candidate experiences to JD requirements with STAR rewrites',
+          description: 'Match candidate experiences to JD requirements',
           parameters: {
             type: 'object',
             properties: {
@@ -53,10 +53,8 @@ Match the candidate's experiences to the job requirements. For each match, provi
                   properties: {
                     requirement_index: { type: 'number', description: 'Index of the JD requirement' },
                     matched: { type: 'boolean' },
-                    original_bullet: { type: ['string', 'null'] },
-                    star_enhanced: { type: ['string', 'null'] },
-                    source_work: { type: ['string', 'null'], description: 'Company + Title' },
-                    needs_metric: { type: 'boolean', description: 'True if bullet lacks quantifiable result' }
+                    original_bullet: { type: ['string', 'null'], description: 'Exact original text from resume, unchanged' },
+                    source_work: { type: ['string', 'null'], description: 'Company + Title where this experience is from' }
                   },
                   required: ['requirement_index', 'matched']
                 }
@@ -89,20 +87,17 @@ Match the candidate's experiences to the job requirements. For each match, provi
       requirement_index: number
       matched: boolean
       original_bullet: string | null
-      star_enhanced: string | null
       source_work: string | null
-      needs_metric: boolean
     }>
     match_score: { matched: number; total: number; percentage: number }
   }
 
-  // Map to MatchCard format with IDs
   const cards = result.cards.map((card, i) => ({
     id: `card-${i}`,
     requirement: requirements[card.requirement_index] || requirements[0],
     matched: card.matched,
     original_bullet: card.original_bullet,
-    star_enhanced: card.star_enhanced,
+    star_enhanced: null,
     source_work: card.source_work,
     status: 'approved' as const,
     edited_text: null

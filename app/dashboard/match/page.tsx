@@ -43,13 +43,11 @@ type Step = 'input' | 'analyzing' | 'results'
 type AnalysisPhase =
   | 'extracting_requirements'
   | 'matching_experiences'
-  | 'generating_star'
   | 'done'
 
 const PHASE_LABELS: Record<AnalysisPhase, string> = {
   extracting_requirements: 'Analyzing requirements...',
   matching_experiences: 'Matching experiences...',
-  generating_star: 'Generating STAR format...',
   done: 'Complete!',
 }
 
@@ -148,12 +146,8 @@ export default function MatchPage() {
       const requirements: JDRequirement[] = jdData.requirements
       setJdRequirements(requirements)
 
-      // Phase 2: Match + rewrite
+      // Phase 2: Match experiences
       setPhase('matching_experiences')
-
-      // Brief pause so the user sees the phase change
-      await new Promise((r) => setTimeout(r, 600))
-      setPhase('generating_star')
 
       const matchRes = await fetch('/api/match-rewrite', {
         method: 'POST',
@@ -202,7 +196,7 @@ export default function MatchPage() {
 
   function startEditing(card: MatchCard) {
     setEditingCardId(card.id)
-    setEditText(card.edited_text ?? card.star_enhanced ?? '')
+    setEditText(card.edited_text ?? card.original_bullet ?? '')
   }
 
   function saveEdit(cardId: string) {
@@ -511,8 +505,8 @@ export default function MatchPage() {
             Match your experience to a job description
           </CardTitle>
           <CardDescription>
-            Paste a job description and we will identify which of your experiences match,
-            then rewrite them in STAR format tailored to the role.
+            Paste a job description and we will identify which of your experiences
+            best match each requirement.
           </CardDescription>
         </CardHeader>
 
@@ -658,8 +652,7 @@ function MatchCardView({
   }
 
   // Matched card
-  const displayText = card.edited_text ?? card.star_enhanced ?? ''
-  const needsMetric = !!(card as MatchCard & { needs_metric?: boolean }).needs_metric
+  const displayText = card.edited_text ?? card.original_bullet ?? ''
 
   return (
     <Card className={`${isSkipped ? 'opacity-50' : ''} ${card.status === 'approved' || card.status === 'edited' ? 'border-l-4 border-l-green-500' : ''}`}>
@@ -697,24 +690,14 @@ function MatchCardView({
         {/* Source attribution */}
         {card.source_work && (
           <p className="text-xs text-muted-foreground">
-            Source: {card.source_work}
+            From: {card.source_work}
           </p>
         )}
 
-        {/* Metric banner */}
-        {needsMetric && !isEditing && (
-          <div className="flex items-start gap-2 rounded-md bg-yellow-500/10 px-3 py-2 text-sm text-yellow-700 dark:text-yellow-400">
-            <AlertTriangle className="mt-0.5 size-4 shrink-0" />
-            <span>
-              Can you add a specific outcome? e.g., percentage, number of users, time saved
-            </span>
-          </div>
-        )}
-
-        {/* Two-column comparison */}
+        {/* Matched experience */}
         {isEditing ? (
           <div className="space-y-3">
-            <Label>Edit STAR-enhanced text</Label>
+            <Label>Edit experience text</Label>
             <Textarea
               value={editText}
               onChange={(e) => onEditTextChange(e.target.value)}
@@ -730,19 +713,8 @@ function MatchCardView({
             </div>
           </div>
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-1.5">
-              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                Your experience
-              </p>
-              <p className="text-sm leading-relaxed">{card.original_bullet}</p>
-            </div>
-            <div className="space-y-1.5">
-              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                STAR-enhanced
-              </p>
-              <p className="text-sm leading-relaxed">{displayText}</p>
-            </div>
+          <div className="rounded-md bg-muted/50 px-4 py-3">
+            <p className="text-sm leading-relaxed">{displayText}</p>
           </div>
         )}
 
