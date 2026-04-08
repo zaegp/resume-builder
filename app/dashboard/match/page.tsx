@@ -89,6 +89,12 @@ export default function MatchPage() {
   // Track which matched items are included (all included by default)
   const [excludedIds, setExcludedIds] = useState<Set<string>>(new Set())
 
+  // Gap fill state
+  const [expandedGapId, setExpandedGapId] = useState<string | null>(null)
+  const [gapInput, setGapInput] = useState('')
+  const [polishing, setPolishing] = useState(false)
+  const [polishedText, setPolishedText] = useState<string | null>(null)
+
   const [saving, setSaving] = useState(false)
 
   const fetchProfiles = useCallback(async () => {
@@ -178,6 +184,84 @@ export default function MatchPage() {
       }
       return next
     })
+  }
+
+  // Gap fill: polish rough text with AI
+  async function handlePolish(requirementDesc: string) {
+    if (!gapInput.trim()) return
+    setPolishing(true)
+    setPolishedText(null)
+    try {
+      const res = await fetch('/api/polish-bullet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rough_text: gapInput,
+          requirement: requirementDesc,
+          language,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      setPolishedText(data.polished)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to polish text.')
+    } finally {
+      setPolishing(false)
+    }
+  }
+
+  // Gap fill: save polished bullet to profile + add as matched card
+  async function handleSaveGapFill(card: MatchCard) {
+    if (!polishedText || !selectedProfileId || !matchResult) return
+
+    try {
+      // Fetch current profile
+      const { data: profileRow } = await supabase
+        .from('profiles')
+        .select('extracted_data')
+        .eq('id', selectedProfileId)
+        .single()
+
+      if (!profileRow) throw new Error('Profile not found')
+
+      const profileData = profileRow.extracted_data as import('@/lib/types').ExtractedProfile
+
+      // Add the new bullet to the first work entry
+      if (profileData.work.length > 0) {
+        profileData.work[0].bullets.push(polishedText)
+      }
+
+      // Update profile in DB
+      await supabase
+        .from('profiles')
+        .update({ extracted_data: profileData })
+        .eq('id', selectedProfileId)
+
+      // Convert this gap card to a matched card in the result
+      const newCards = matchResult.cards.map(c =>
+        c.id === card.id
+          ? { ...c, matched: true, original_bullet: polishedText, source_work: profileData.work[0]?.company + ' — ' + profileData.work[0]?.title }
+          : c
+      )
+
+      const newMatchedCount = newCards.filter(c => c.matched).length
+      setMatchResult({
+        cards: newCards,
+        match_score: {
+          matched: newMatchedCount,
+          total: matchResult.match_score.total,
+          percentage: Math.round((newMatchedCount / matchResult.match_score.total) * 100),
+        },
+      })
+
+      // Reset gap fill state
+      setExpandedGapId(null)
+      setGapInput('')
+      setPolishedText(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save experience.')
+    }
   }
 
   // Generate resume
@@ -408,7 +492,7 @@ export default function MatchPage() {
           </div>
         )}
 
-        {/* Gaps — what's missing */}
+        {/* Gaps — what's missing, with inline add */}
         {gapCards.length > 0 && (
           <div className="space-y-3">
             <h2 className="text-lg font-semibold flex items-center gap-2">
@@ -416,23 +500,115 @@ export default function MatchPage() {
               Gaps ({gapCards.length})
             </h2>
             <p className="text-sm text-muted-foreground">
-              These JD requirements have no matching experience in your profile.
-              Consider adding relevant experiences to strengthen future applications.
+              Click &quot;Add Experience&quot; to quickly fill a gap. Describe what you did and AI will polish it.
             </p>
             <div className="space-y-2">
-              {gapCards.map(card => (
-                <div key={card.id} className="flex items-start gap-3 rounded-lg border border-red-500/20 bg-red-500/5 p-4">
-                  <XCircle className="mt-0.5 size-5 shrink-0 text-red-500" />
-                  <div>
-                    <div className="flex items-center gap-2 mb-1">
-                      <Badge variant="secondary" className="text-xs">
-                        {card.requirement.category}
-                      </Badge>
+              {gapCards.map(card => {
+                const isExpanded = expandedGapId === card.id
+                return (
+                  <div key={card.id} className="rounded-lg border border-red-500/20 bg-red-500/5 overflow-hidden">
+                    <div className="flex items-start gap-3 p-4">
+                      <XCircle className="mt-0.5 size-5 shrink-0 text-red-500" />
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Badge variant="secondary" className="text-xs">
+                            {card.requirement.category}
+                          </Badge>
+                        </div>
+                        <p className="text-sm font-medium">{card.requirement.description}</p>
+                      </div>
+                      {!isExpanded && (
+                        <button
+                          type="button"
+                          className="shrink-0 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium hover:bg-muted"
+                          onClick={() => {
+                            setExpandedGapId(card.id)
+                            setGapInput('')
+                            setPolishedText(null)
+                          }}
+                        >
+                          + Add Experience
+                        </button>
+                      )}
                     </div>
-                    <p className="text-sm font-medium">{card.requirement.description}</p>
+
+                    {isExpanded && (
+                      <div className="border-t border-red-500/10 bg-background p-4 space-y-3">
+                        <Label className="text-sm">Briefly describe your relevant experience</Label>
+                        <Textarea
+                          placeholder="e.g. I used React to build an internal dashboard at my previous company..."
+                          value={gapInput}
+                          onChange={e => { setGapInput(e.target.value); setPolishedText(null) }}
+                          className="min-h-20 resize-y"
+                        />
+
+                        {!polishedText && (
+                          <div className="flex gap-2">
+                            <button
+                              type="button"
+                              disabled={!gapInput.trim() || polishing}
+                              onClick={() => handlePolish(card.requirement.description)}
+                              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                            >
+                              {polishing ? (
+                                <>
+                                  <div className="size-3 rounded-full border-2 border-primary-foreground border-t-transparent animate-spin" />
+                                  Polishing...
+                                </>
+                              ) : (
+                                <>
+                                  <Sparkles className="size-3" />
+                                  Polish with AI
+                                </>
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-muted"
+                              onClick={() => { setExpandedGapId(null); setGapInput(''); setPolishedText(null) }}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        )}
+
+                        {polishedText && (
+                          <div className="space-y-3">
+                            <div className="rounded-md border border-green-500/30 bg-green-500/5 p-3">
+                              <p className="text-xs font-medium text-muted-foreground mb-1">AI-polished version:</p>
+                              <p className="text-sm">{polishedText}</p>
+                            </div>
+                            <div className="flex gap-2">
+                              <button
+                                type="button"
+                                onClick={() => handleSaveGapFill(card)}
+                                className="inline-flex items-center gap-1.5 rounded-md bg-green-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-700"
+                              >
+                                <Check className="size-3" />
+                                Use this & add to resume
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setPolishedText(null)}
+                                className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-muted"
+                              >
+                                Try again
+                              </button>
+                              <button
+                                type="button"
+                                className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-muted"
+                                onClick={() => { setExpandedGapId(null); setGapInput(''); setPolishedText(null) }}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           </div>
         )}
