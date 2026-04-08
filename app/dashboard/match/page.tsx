@@ -29,13 +29,14 @@ import { Progress, ProgressLabel, ProgressValue } from '@/components/ui/progress
 import {
   CheckCircle2,
   XCircle,
-  Edit2,
   ChevronRight,
   FileText,
   Languages,
   BarChart3,
   Sparkles,
   AlertTriangle,
+  Check,
+  Minus,
 } from 'lucide-react'
 
 type Step = 'input' | 'analyzing' | 'results'
@@ -57,10 +58,10 @@ function scoreColor(percentage: number): string {
   return 'text-red-600 dark:text-red-400'
 }
 
-function scoreBorderColor(percentage: number): string {
-  if (percentage > 70) return 'border-green-500'
-  if (percentage >= 40) return 'border-yellow-500'
-  return 'border-red-500'
+function scoreBg(percentage: number): string {
+  if (percentage > 70) return 'bg-green-500/10'
+  if (percentage >= 40) return 'bg-yellow-500/10'
+  return 'bg-red-500/10'
 }
 
 function progressIndicatorColor(percentage: number): string {
@@ -73,28 +74,23 @@ export default function MatchPage() {
   const router = useRouter()
   const supabase = createClient()
 
-  // Step 1: Input state
   const [profiles, setProfiles] = useState<ProfileRow[]>([])
   const [loadingProfiles, setLoadingProfiles] = useState(true)
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null)
   const [jdText, setJdText] = useState('')
   const [language, setLanguage] = useState<OutputLanguage>('en')
 
-  // Step 2-3: Analysis state
   const [step, setStep] = useState<Step>('input')
   const [phase, setPhase] = useState<AnalysisPhase>('extracting_requirements')
   const [jdRequirements, setJdRequirements] = useState<JDRequirement[]>([])
   const [matchResult, setMatchResult] = useState<MatchResult | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  // Card editing state
-  const [editingCardId, setEditingCardId] = useState<string | null>(null)
-  const [editText, setEditText] = useState('')
+  // Track which matched items are included (all included by default)
+  const [excludedIds, setExcludedIds] = useState<Set<string>>(new Set())
 
-  // Saving state
   const [saving, setSaving] = useState(false)
 
-  // Fetch profiles
   const fetchProfiles = useCallback(async () => {
     setLoadingProfiles(true)
     const { data: { user } } = await supabase.auth.getUser()
@@ -120,17 +116,16 @@ export default function MatchPage() {
     fetchProfiles()
   }, [fetchProfiles])
 
-  // ---- Analysis flow ----
-
+  // Analysis flow
   async function handleAnalyze() {
     if (!selectedProfileId || !jdText.trim()) return
 
     setError(null)
     setStep('analyzing')
     setPhase('extracting_requirements')
+    setExcludedIds(new Set())
 
     try {
-      // Phase 1: Analyze JD
       const jdRes = await fetch('/api/analyze-jd', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -146,7 +141,6 @@ export default function MatchPage() {
       const requirements: JDRequirement[] = jdData.requirements
       setJdRequirements(requirements)
 
-      // Phase 2: Match experiences
       setPhase('matching_experiences')
 
       const matchRes = await fetch('/api/match-rewrite', {
@@ -161,7 +155,7 @@ export default function MatchPage() {
 
       if (!matchRes.ok) {
         const err = await matchRes.json().catch(() => ({}))
-        throw new Error(err.error ?? 'Failed to match and rewrite experiences.')
+        throw new Error(err.error ?? 'Failed to match experiences.')
       }
 
       const result: MatchResult = await matchRes.json()
@@ -174,51 +168,25 @@ export default function MatchPage() {
     }
   }
 
-  // ---- Card actions ----
-
-  function updateCard(cardId: string, updates: Partial<MatchCard>) {
-    if (!matchResult) return
-    setMatchResult({
-      ...matchResult,
-      cards: matchResult.cards.map((c) =>
-        c.id === cardId ? { ...c, ...updates } : c
-      ),
+  function toggleInclude(cardId: string) {
+    setExcludedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(cardId)) {
+        next.delete(cardId)
+      } else {
+        next.add(cardId)
+      }
+      return next
     })
   }
 
-  function approveCard(cardId: string) {
-    updateCard(cardId, { status: 'approved' })
-  }
-
-  function skipCard(cardId: string) {
-    updateCard(cardId, { status: 'skipped' })
-  }
-
-  function startEditing(card: MatchCard) {
-    setEditingCardId(card.id)
-    setEditText(card.edited_text ?? card.original_bullet ?? '')
-  }
-
-  function saveEdit(cardId: string) {
-    updateCard(cardId, { status: 'edited', edited_text: editText })
-    setEditingCardId(null)
-    setEditText('')
-  }
-
-  function cancelEdit() {
-    setEditingCardId(null)
-    setEditText('')
-  }
-
-  // ---- Generate resume ----
-
-  const approvedCards = matchResult?.cards.filter(
-    (c) => c.status === 'approved' || c.status === 'edited'
-  ) ?? []
-  const allSkipped = matchResult !== null && approvedCards.length === 0
+  // Generate resume
+  const matchedCards = matchResult?.cards.filter(c => c.matched) ?? []
+  const gapCards = matchResult?.cards.filter(c => !c.matched) ?? []
+  const includedCards = matchedCards.filter(c => !excludedIds.has(c.id))
 
   async function handleGenerate() {
-    if (!matchResult || !selectedProfileId || approvedCards.length === 0) return
+    if (!matchResult || !selectedProfileId || includedCards.length === 0) return
 
     setSaving(true)
     setError(null)
@@ -227,6 +195,12 @@ export default function MatchPage() {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) throw new Error('Not authenticated.')
 
+      // Mark included cards as approved, excluded as skipped
+      const finalCards = matchResult.cards.map(c => ({
+        ...c,
+        status: (!c.matched || excludedIds.has(c.id)) ? 'skipped' as const : 'approved' as const,
+      }))
+
       const { data, error } = await supabase
         .from('resumes')
         .insert({
@@ -234,7 +208,7 @@ export default function MatchPage() {
           profile_id: selectedProfileId,
           jd_text: jdText,
           jd_requirements: jdRequirements,
-          matched_experiences: matchResult.cards,
+          matched_experiences: finalCards,
           match_score: matchResult.match_score.percentage,
           language,
         })
@@ -250,31 +224,20 @@ export default function MatchPage() {
     }
   }
 
-  // ---- Render: Loading ----
-
+  // ---- Loading ----
   if (loadingProfiles) {
     return (
       <div className="space-y-4">
         <h1 className="text-2xl font-bold">JD Matcher</h1>
         <Card>
-          <CardHeader>
-            <Skeleton className="h-5 w-48" />
-            <Skeleton className="mt-2 h-4 w-64" />
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              <Skeleton className="h-9 w-full" />
-              <Skeleton className="h-32 w-full" />
-              <Skeleton className="h-9 w-32" />
-            </div>
-          </CardContent>
+          <CardHeader><Skeleton className="h-5 w-48" /></CardHeader>
+          <CardContent><Skeleton className="h-32 w-full" /></CardContent>
         </Card>
       </div>
     )
   }
 
-  // ---- Render: No profiles ----
-
+  // ---- No profiles ----
   if (profiles.length === 0) {
     return (
       <div className="space-y-6">
@@ -290,21 +253,20 @@ export default function MatchPage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="flex justify-center">
-            <Button render={<Link href="/dashboard/profile" />}>
+            <Link href="/dashboard/profile" className="inline-flex items-center gap-1 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">
               Upload a resume
-              <ChevronRight className="ml-1 size-4" />
-            </Button>
+              <ChevronRight className="size-4" />
+            </Link>
           </CardContent>
         </Card>
       </div>
     )
   }
 
-  // ---- Render: Analyzing ----
-
+  // ---- Analyzing ----
   if (step === 'analyzing') {
     const phaseIndex = Object.keys(PHASE_LABELS).indexOf(phase)
-    const totalPhases = Object.keys(PHASE_LABELS).length - 1 // exclude 'done'
+    const totalPhases = Object.keys(PHASE_LABELS).length - 1
     const progressValue = Math.round(((phaseIndex + 1) / totalPhases) * 100)
 
     return (
@@ -316,36 +278,23 @@ export default function MatchPage() {
               <Sparkles className="size-8 text-primary animate-pulse" />
             </div>
             <CardTitle>Analyzing your match</CardTitle>
-            <CardDescription>
-              This usually takes 10-20 seconds.
-            </CardDescription>
+            <CardDescription>This usually takes 10-20 seconds.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
             <Progress value={progressValue}>
               <ProgressLabel>{PHASE_LABELS[phase]}</ProgressLabel>
               <ProgressValue />
             </Progress>
-
             <div className="space-y-3">
               {(Object.keys(PHASE_LABELS) as AnalysisPhase[])
-                .filter((p) => p !== 'done')
-                .map((p) => {
+                .filter(p => p !== 'done')
+                .map(p => {
                   const idx = Object.keys(PHASE_LABELS).indexOf(p)
                   const currentIdx = Object.keys(PHASE_LABELS).indexOf(phase)
                   const isDone = idx < currentIdx
                   const isCurrent = idx === currentIdx
-
                   return (
-                    <div
-                      key={p}
-                      className={`flex items-center gap-2 text-sm transition-opacity ${
-                        isDone
-                          ? 'text-muted-foreground'
-                          : isCurrent
-                            ? 'font-medium text-foreground'
-                            : 'text-muted-foreground/50'
-                      }`}
-                    >
+                    <div key={p} className={`flex items-center gap-2 text-sm ${isDone ? 'text-muted-foreground' : isCurrent ? 'font-medium text-foreground' : 'text-muted-foreground/50'}`}>
                       {isDone ? (
                         <CheckCircle2 className="size-4 text-green-500" />
                       ) : isCurrent ? (
@@ -364,40 +313,31 @@ export default function MatchPage() {
     )
   }
 
-  // ---- Render: Results ----
-
+  // ---- Results ----
   if (step === 'results' && matchResult) {
-    const { match_score, cards } = matchResult
-    const matchedCount = cards.filter((c) => c.matched).length
-    const gapCount = cards.filter((c) => !c.matched).length
+    const { match_score } = matchResult
 
     return (
       <div className="space-y-6">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">Match Results</h1>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              setStep('input')
-              setMatchResult(null)
-              setJdRequirements([])
-            }}
+          <button
+            type="button"
+            className="rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-muted"
+            onClick={() => { setStep('input'); setMatchResult(null); setJdRequirements([]) }}
           >
             Start over
-          </Button>
+          </button>
         </div>
 
         {/* Score Dashboard */}
-        <Card>
+        <Card className={scoreBg(match_score.percentage)}>
           <CardContent className="pt-6">
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-8">
               <div className="flex items-center gap-3">
-                <div className={`rounded-full border-4 p-3 ${scoreBorderColor(match_score.percentage)}`}>
-                  <BarChart3 className={`size-6 ${scoreColor(match_score.percentage)}`} />
-                </div>
+                <BarChart3 className={`size-8 ${scoreColor(match_score.percentage)}`} />
                 <div>
-                  <p className={`text-2xl font-bold tabular-nums ${scoreColor(match_score.percentage)}`}>
+                  <p className={`text-3xl font-bold tabular-nums ${scoreColor(match_score.percentage)}`}>
                     {match_score.percentage}%
                   </p>
                   <p className="text-sm text-muted-foreground">
@@ -405,25 +345,10 @@ export default function MatchPage() {
                   </p>
                 </div>
               </div>
-
               <div className="flex-1">
-                <Progress
-                  value={match_score.percentage}
-                  className={progressIndicatorColor(match_score.percentage)}
-                >
+                <Progress value={match_score.percentage} className={progressIndicatorColor(match_score.percentage)}>
                   <ProgressLabel className="sr-only">Match score</ProgressLabel>
                 </Progress>
-              </div>
-
-              <div className="flex gap-3">
-                <Badge variant="secondary" className="gap-1">
-                  <CheckCircle2 className="size-3 text-green-500" />
-                  {matchedCount} matched
-                </Badge>
-                <Badge variant="secondary" className="gap-1">
-                  <XCircle className="size-3 text-red-500" />
-                  {gapCount} gaps
-                </Badge>
               </div>
             </div>
           </CardContent>
@@ -436,64 +361,118 @@ export default function MatchPage() {
           </div>
         )}
 
-        {/* Match Cards */}
-        <div className="space-y-4">
-          {cards.map((card) => (
-            <MatchCardView
-              key={card.id}
-              card={card}
-              isEditing={editingCardId === card.id}
-              editText={editText}
-              onEditTextChange={setEditText}
-              onApprove={() => approveCard(card.id)}
-              onSkip={() => skipCard(card.id)}
-              onStartEdit={() => startEditing(card)}
-              onSaveEdit={() => saveEdit(card.id)}
-              onCancelEdit={cancelEdit}
-            />
-          ))}
-        </div>
+        {/* Matched experiences — auto-included, toggle to exclude */}
+        {matchedCards.length > 0 && (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold flex items-center gap-2">
+                <CheckCircle2 className="size-5 text-green-500" />
+                Matched ({matchedCards.length})
+              </h2>
+              <p className="text-sm text-muted-foreground">
+                Uncheck items you don&apos;t want in your resume
+              </p>
+            </div>
+            <div className="space-y-2">
+              {matchedCards.map(card => {
+                const included = !excludedIds.has(card.id)
+                return (
+                  <div
+                    key={card.id}
+                    className={`flex items-start gap-3 rounded-lg border p-4 cursor-pointer transition-colors ${
+                      included ? 'border-green-500/30 bg-green-500/5' : 'border-border opacity-50'
+                    }`}
+                    onClick={() => toggleInclude(card.id)}
+                  >
+                    <div className={`mt-0.5 flex size-5 shrink-0 items-center justify-center rounded border ${
+                      included ? 'border-green-500 bg-green-500 text-white' : 'border-muted-foreground/30'
+                    }`}>
+                      {included && <Check className="size-3" />}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        <Badge variant="secondary" className="text-xs shrink-0">
+                          {card.requirement.category}
+                        </Badge>
+                        <span className="text-sm font-medium truncate">{card.requirement.description}</span>
+                      </div>
+                      <p className="text-sm text-muted-foreground">{card.original_bullet}</p>
+                      {card.source_work && (
+                        <p className="text-xs text-muted-foreground/70 mt-1">From: {card.source_work}</p>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
 
-        {/* Generate button */}
+        {/* Gaps — what's missing */}
+        {gapCards.length > 0 && (
+          <div className="space-y-3">
+            <h2 className="text-lg font-semibold flex items-center gap-2">
+              <Minus className="size-5 text-red-500" />
+              Gaps ({gapCards.length})
+            </h2>
+            <p className="text-sm text-muted-foreground">
+              These JD requirements have no matching experience in your profile.
+              Consider adding relevant experiences to strengthen future applications.
+            </p>
+            <div className="space-y-2">
+              {gapCards.map(card => (
+                <div key={card.id} className="flex items-start gap-3 rounded-lg border border-red-500/20 bg-red-500/5 p-4">
+                  <XCircle className="mt-0.5 size-5 shrink-0 text-red-500" />
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <Badge variant="secondary" className="text-xs">
+                        {card.requirement.category}
+                      </Badge>
+                    </div>
+                    <p className="text-sm font-medium">{card.requirement.description}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Generate */}
         <Separator />
-
         <div className="flex items-center justify-between gap-4">
-          <div className="text-sm text-muted-foreground">
-            {approvedCards.length} experience{approvedCards.length !== 1 ? 's' : ''} selected
-          </div>
-
-          <div className="flex items-center gap-3">
-            {allSkipped && (
-              <div className="flex items-center gap-1.5 text-sm text-yellow-600 dark:text-yellow-400">
-                <AlertTriangle className="size-4" />
-                Select at least one experience to include
-              </div>
+          <p className="text-sm text-muted-foreground">
+            {includedCards.length} experience{includedCards.length !== 1 ? 's' : ''} will be included in your resume
+          </p>
+          <button
+            type="button"
+            disabled={includedCards.length === 0 || saving}
+            onClick={handleGenerate}
+            className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:pointer-events-none"
+          >
+            {saving ? (
+              <>
+                <div className="size-4 rounded-full border-2 border-primary-foreground border-t-transparent animate-spin" />
+                Saving...
+              </>
+            ) : (
+              <>
+                <Sparkles className="size-4" />
+                Generate Resume
+              </>
             )}
-            <Button
-              size="lg"
-              disabled={allSkipped || saving}
-              onClick={handleGenerate}
-            >
-              {saving ? (
-                <>
-                  <div className="size-4 rounded-full border-2 border-primary-foreground border-t-transparent animate-spin" />
-                  Saving...
-                </>
-              ) : (
-                <>
-                  <Sparkles className="size-4" />
-                  Generate Resume
-                </>
-              )}
-            </Button>
-          </div>
+          </button>
         </div>
+        {includedCards.length === 0 && (
+          <p className="text-sm text-yellow-600 dark:text-yellow-400 flex items-center gap-1.5">
+            <AlertTriangle className="size-4" />
+            Include at least one experience to generate a resume
+          </p>
+        )}
       </div>
     )
   }
 
-  // ---- Render: Input form (Step 1) ----
-
+  // ---- Input form ----
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">JD Matcher</h1>
@@ -505,44 +484,38 @@ export default function MatchPage() {
             Match your experience to a job description
           </CardTitle>
           <CardDescription>
-            Paste a job description and we will identify which of your experiences
-            best match each requirement.
+            Paste a job description and we&apos;ll show which of your experiences match
+            and what gaps you need to fill.
           </CardDescription>
         </CardHeader>
 
         <CardContent className="space-y-6">
-          {/* Profile selector */}
           <div className="space-y-2">
             <Label htmlFor="profile-select">Resume profile</Label>
             <Select
               value={selectedProfileId ?? undefined}
-              onValueChange={(val) => setSelectedProfileId(val as string)}
+              onValueChange={val => setSelectedProfileId(val)}
             >
               <SelectTrigger className="w-full" id="profile-select">
                 <SelectValue placeholder="Select a profile" />
               </SelectTrigger>
               <SelectContent>
-                {profiles.map((p) => (
+                {profiles.map(p => (
                   <SelectItem key={p.id} value={p.id}>
-                    <FileText className="size-3.5 text-muted-foreground" />
-                    {p.source_file_name ?? 'Uploaded Resume'}
-                    <span className="ml-auto text-xs text-muted-foreground">
-                      {p.extracted_data.work?.length ?? 0} experiences
-                    </span>
+                    {p.source_file_name ?? 'Uploaded Resume'} ({p.extracted_data.work?.length ?? 0} experiences)
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
           </div>
 
-          {/* JD textarea */}
           <div className="space-y-2">
             <Label htmlFor="jd-textarea">Job description</Label>
             <Textarea
               id="jd-textarea"
               placeholder="Paste the full job description here..."
               value={jdText}
-              onChange={(e) => setJdText(e.target.value)}
+              onChange={e => setJdText(e.target.value)}
               className="min-h-48 resize-y"
             />
             <p className="text-xs text-muted-foreground">
@@ -552,16 +525,12 @@ export default function MatchPage() {
             </p>
           </div>
 
-          {/* Language selector */}
           <div className="space-y-2">
             <Label htmlFor="language-select" className="flex items-center gap-1.5">
               <Languages className="size-3.5" />
               Output language
             </Label>
-            <Select
-              value={language}
-              onValueChange={(val) => setLanguage(val as OutputLanguage)}
-            >
+            <Select value={language} onValueChange={val => setLanguage(val as OutputLanguage)}>
               <SelectTrigger className="w-48" id="language-select">
                 <SelectValue />
               </SelectTrigger>
@@ -579,178 +548,18 @@ export default function MatchPage() {
             </div>
           )}
 
-          {/* Analyze button */}
-          <Button
-            size="lg"
+          <button
+            type="button"
             disabled={!selectedProfileId || !jdText.trim()}
             onClick={handleAnalyze}
-            className="w-full sm:w-auto"
+            className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:pointer-events-none"
           >
             <Sparkles className="size-4" />
             Analyze
             <ChevronRight className="size-4" />
-          </Button>
+          </button>
         </CardContent>
       </Card>
     </div>
-  )
-}
-
-// ---- Match Card Component ----
-
-function MatchCardView({
-  card,
-  isEditing,
-  editText,
-  onEditTextChange,
-  onApprove,
-  onSkip,
-  onStartEdit,
-  onSaveEdit,
-  onCancelEdit,
-}: {
-  card: MatchCard
-  isEditing: boolean
-  editText: string
-  onEditTextChange: (text: string) => void
-  onApprove: () => void
-  onSkip: () => void
-  onStartEdit: () => void
-  onSaveEdit: () => void
-  onCancelEdit: () => void
-}) {
-  const isSkipped = card.status === 'skipped'
-
-  // Gap card
-  if (!card.matched) {
-    return (
-      <Card className={`border-l-4 border-l-red-500 ${isSkipped ? 'opacity-50' : ''}`}>
-        <CardContent className="pt-6">
-          <div className="flex items-start justify-between gap-4">
-            <div className="flex-1 space-y-2">
-              <div className="flex items-center gap-2">
-                <Badge variant="secondary" className="text-xs">
-                  {card.requirement.category}
-                </Badge>
-                <Badge variant="destructive" className="gap-1 text-xs">
-                  <XCircle className="size-3" />
-                  Gap
-                </Badge>
-              </div>
-              <p className="text-sm font-medium">{card.requirement.description}</p>
-              <p className="text-sm text-muted-foreground">
-                No matching experience found
-              </p>
-            </div>
-            <Button variant="outline" size="sm" render={<Link href="/dashboard/profile" />}>
-              Add experience
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-    )
-  }
-
-  // Matched card
-  const displayText = card.edited_text ?? card.original_bullet ?? ''
-
-  return (
-    <Card className={`${isSkipped ? 'opacity-50' : ''} ${card.status === 'approved' || card.status === 'edited' ? 'border-l-4 border-l-green-500' : ''}`}>
-      <CardContent className="pt-6 space-y-4">
-        {/* Requirement header */}
-        <div className="flex items-start justify-between gap-4">
-          <div className="flex-1 space-y-1">
-            <div className="flex items-center gap-2 flex-wrap">
-              <Badge variant="secondary" className="text-xs">
-                {card.requirement.category}
-              </Badge>
-              {card.status === 'approved' && (
-                <Badge className="gap-1 bg-green-500/10 text-green-600 dark:text-green-400 text-xs">
-                  <CheckCircle2 className="size-3" />
-                  Approved
-                </Badge>
-              )}
-              {card.status === 'edited' && (
-                <Badge className="gap-1 bg-blue-500/10 text-blue-600 dark:text-blue-400 text-xs">
-                  <Edit2 className="size-3" />
-                  Edited
-                </Badge>
-              )}
-              {card.status === 'skipped' && (
-                <Badge className="gap-1 bg-muted text-muted-foreground text-xs">
-                  <XCircle className="size-3" />
-                  Skipped
-                </Badge>
-              )}
-            </div>
-            <p className="text-sm font-medium">{card.requirement.description}</p>
-          </div>
-        </div>
-
-        {/* Source attribution */}
-        {card.source_work && (
-          <p className="text-xs text-muted-foreground">
-            From: {card.source_work}
-          </p>
-        )}
-
-        {/* Matched experience */}
-        {isEditing ? (
-          <div className="space-y-3">
-            <Label>Edit experience text</Label>
-            <Textarea
-              value={editText}
-              onChange={(e) => onEditTextChange(e.target.value)}
-              className="min-h-24 resize-y"
-            />
-            <div className="flex gap-2">
-              <Button size="sm" onClick={onSaveEdit}>
-                Save
-              </Button>
-              <Button variant="outline" size="sm" onClick={onCancelEdit}>
-                Cancel
-              </Button>
-            </div>
-          </div>
-        ) : (
-          <div className="rounded-md bg-muted/50 px-4 py-3">
-            <p className="text-sm leading-relaxed">{displayText}</p>
-          </div>
-        )}
-
-        {/* Action buttons */}
-        {!isEditing && (
-          <>
-            <Separator />
-            <div className="flex gap-2">
-              <Button
-                size="sm"
-                variant={card.status === 'approved' || card.status === 'edited' ? 'default' : 'outline'}
-                onClick={onApprove}
-              >
-                <CheckCircle2 className="size-3.5" />
-                Approve
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={onStartEdit}
-              >
-                <Edit2 className="size-3.5" />
-                Edit
-              </Button>
-              <Button
-                size="sm"
-                variant={card.status === 'skipped' ? 'destructive' : 'ghost'}
-                onClick={onSkip}
-              >
-                <XCircle className="size-3.5" />
-                Skip
-              </Button>
-            </div>
-          </>
-        )}
-      </CardContent>
-    </Card>
   )
 }
